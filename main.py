@@ -18,14 +18,33 @@ with WORKFLOW_PATH.open(encoding="utf-8") as f:
     WORKFLOW_TEMPLATE = json.load(f)
 
 def build_workflow(prompt: str) -> dict:
+    """
+    Builds a ComfyUI workflow from the template with the given prompt.
+
+    Args:
+        prompt: The text prompt to be used in the workflow.
+
+    Returns:
+        A dictionary representing the ComfyUI workflow.
+    """
     wf = json.loads(json.dumps(WORKFLOW_TEMPLATE))
     wf["6"]["inputs"]["text"] = prompt
     return wf
 
 async def wait_for_image_meta(prompt_id: str, timeout: int = 120) -> dict:
     """
-    轮询 /history/{prompt_id} 直到拿到第一张输出图片的元数据
-    返回形如 {"filename": "...", "subfolder": "...", "type": "output"}
+    Polls the /history/{prompt_id} endpoint until the first output image metadata is available.
+
+    Args:
+        prompt_id: The ID of the prompt to wait for.
+        timeout: The maximum time to wait in seconds.
+
+    Returns:
+        A dictionary containing the metadata of the first output image,
+        e.g., {"filename": "...", "subfolder": "...", "type": "output"}.
+
+    Raises:
+        HTTPException: If the ComfyUI server times out.
     """
     url = f"{BASE}/history/{prompt_id}"
     async with aiohttp.ClientSession() as session:
@@ -51,7 +70,16 @@ async def wait_for_image_meta(prompt_id: str, timeout: int = 120) -> dict:
 
 async def download_image_bytes(meta: dict) -> bytes:
     """
-    通过 /view 下载图片字节，不依赖容器文件系统映射
+    Downloads the image bytes from the /view endpoint.
+
+    Args:
+        meta: A dictionary containing the image metadata.
+
+    Returns:
+        The image data as bytes.
+
+    Raises:
+        HTTPException: If the image download fails.
     """
     params = {
         "filename": meta["filename"],
@@ -65,8 +93,20 @@ async def download_image_bytes(meta: dict) -> bytes:
                 raise HTTPException(502, f"下载图片失败: {text}")
             return await resp.read()
 
-@app.post("/txt2img", summary="文生图")
+@app.post("/txt2img", summary="Text to Image")
 async def txt2img(prompt: str):
+    """
+    Generates an image from a text prompt.
+
+    Args:
+        prompt: The text prompt to generate the image from.
+
+    Returns:
+        A Response object containing the generated image in PNG format.
+
+    Raises:
+        HTTPException: If the ComfyUI server fails to process the request.
+    """
     client_id = str(uuid.uuid4())
     workflow = build_workflow(prompt)
 
@@ -92,4 +132,10 @@ async def txt2img(prompt: str):
 
 @app.get("/")
 def root():
+    """
+    Root endpoint that returns a welcome message.
+
+    Returns:
+        A dictionary with a welcome message.
+    """
     return {"message": "ComfyUI FastAPI wrapper is running"}
