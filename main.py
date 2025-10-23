@@ -2,49 +2,69 @@ from pathlib import Path
 import json
 import asyncio
 import aiohttp
-from fastapi import FastAPI, HTTPException, Response  # 增加 Response
+from fastapi import FastAPI, HTTPException, Response, UploadFile, File
 import uuid
 
 # ----------------- 配置 -----------------
 COMFY_HOST = "127.0.0.1"
 COMFY_PORT = 8188
 BASE = f"http://{COMFY_HOST}:{COMFY_PORT}"
-WORKFLOW_PATH = Path(__file__).with_name("workflow.json")
+WORKFLOW_PATH = Path(__file__).with_name("flux_canny_model_v1.json")
 # ---------------------------------------
 
-app = FastAPI(title="ComfyUI 文生图 API", version="1.0")
+app = FastAPI(title="ComfyUI Flux Canny API", version="1.0")
 
 with WORKFLOW_PATH.open(encoding="utf-8") as f:
     WORKFLOW_TEMPLATE = json.load(f)
 
-def build_workflow(prompt: str) -> dict:
+def build_workflow(prompt: str, image_filename: str = None) -> dict:
     """
-    Builds a ComfyUI workflow from the template with the given prompt.
-
+    构建 Flux Canny 工作流
+    
     Args:
-        prompt: The text prompt to be used in the workflow.
-
+        prompt: 文本提示词
+        image_filename: 输入图像文件名（可选）
+    
     Returns:
-        A dictionary representing the ComfyUI workflow.
+        工作流字典
     """
     wf = json.loads(json.dumps(WORKFLOW_TEMPLATE))
-    wf["6"]["inputs"]["text"] = prompt
+    
+    # 更新节点23的文本提示词
+    wf["23"]["inputs"]["text"] = prompt
+    
+    # 如果提供了图像文件名，更新节点17的输入图像
+    if image_filename:
+        wf["17"]["inputs"]["image"] = image_filename
+    
     return wf
+
+async def upload_image_to_comfyui(image_bytes: bytes, filename: str) -> str:
+    """
+    上传图像到 ComfyUI 服务器
+    """
+    # 验证文件类型
+    allowed_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
+    file_ext = Path(filename).suffix.lower()
+    
+    if file_ext not in allowed_extensions:
+        raise HTTPException(400, f"不支持的文件类型: {file_ext}")
+    
+    data = aiohttp.FormData()
+    data.add_field('image', image_bytes, filename=filename, content_type='image/jpeg')
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{BASE}/upload/image", data=data) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(502, f"上传图像失败: {text}")
+            result = await resp.json()
+            return result.get('name', filename)
 
 async def wait_for_image_meta(prompt_id: str, timeout: int = 120) -> dict:
     """
-    Polls the /history/{prompt_id} endpoint until the first output image metadata is available.
-
-    Args:
-        prompt_id: The ID of the prompt to wait for.
-        timeout: The maximum time to wait in seconds.
-
-    Returns:
-        A dictionary containing the metadata of the first output image,
-        e.g., {"filename": "...", "subfolder": "...", "type": "output"}.
-
-    Raises:
-        HTTPException: If the ComfyUI server times out.
+    等待图像生成完成并获取元数据
+    优先返回 SaveImage 节点（节点9）的输出
     """
     url = f"{BASE}/history/{prompt_id}"
     async with aiohttp.ClientSession() as session:
@@ -58,8 +78,20 @@ async def wait_for_image_meta(prompt_id: str, timeout: int = 120) -> dict:
                     await asyncio.sleep(1)
                     continue
                 outputs = h[prompt_id].get("outputs", {})
-                for node in outputs.values():
-                    for img in node.get("images", []):
+                
+                # 优先查找 SaveImage 节点（节点9）的输出
+                if "9" in outputs:
+                    node_output = outputs["9"]
+                    for img in node_output.get("images", []):
+                        return {
+                            "filename": img["filename"],
+                            "subfolder": img.get("subfolder", ""),
+                            "type": img.get("type", "output"),
+                        }
+                
+                # 如果没有找到 SaveImage 节点，则查找其他图像输出节点
+                for node_id, node_output in outputs.items():
+                    for img in node_output.get("images", []):
                         return {
                             "filename": img["filename"],
                             "subfolder": img.get("subfolder", ""),
@@ -70,16 +102,7 @@ async def wait_for_image_meta(prompt_id: str, timeout: int = 120) -> dict:
 
 async def download_image_bytes(meta: dict) -> bytes:
     """
-    Downloads the image bytes from the /view endpoint.
-
-    Args:
-        meta: A dictionary containing the image metadata.
-
-    Returns:
-        The image data as bytes.
-
-    Raises:
-        HTTPException: If the image download fails.
+    下载生成的图像
     """
     params = {
         "filename": meta["filename"],
@@ -93,24 +116,20 @@ async def download_image_bytes(meta: dict) -> bytes:
                 raise HTTPException(502, f"下载图片失败: {text}")
             return await resp.read()
 
-@app.post("/txt2img", summary="Text to Image")
+@app.post("/txt2img", summary="Text to Image with Flux")
 async def txt2img(prompt: str):
     """
-    Generates an image from a text prompt.
-
+    使用 Flux 模型生成图像
+    
     Args:
-        prompt: The text prompt to generate the image from.
-
+        prompt: 文本提示词
+    
     Returns:
-        A Response object containing the generated image in PNG format.
-
-    Raises:
-        HTTPException: If the ComfyUI server fails to process the request.
+        生成的图像
     """
     client_id = str(uuid.uuid4())
     workflow = build_workflow(prompt)
 
-    # 1) 提交任务
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{BASE}/prompt", json={"prompt": workflow, "client_id": client_id}) as resp:
             if resp.status != 200:
@@ -119,11 +138,45 @@ async def txt2img(prompt: str):
             data = await resp.json()
             prompt_id = data["prompt_id"]
 
-    # 2) 等待完成（注意改成按 prompt_id 轮询）
     meta = await wait_for_image_meta(prompt_id)
-
-    # 3) 通过 /view 拉取图片并直接返回
     img_bytes = await download_image_bytes(meta)
+    
+    return Response(
+        content=img_bytes,
+        media_type="image/png",
+        headers={"Content-Disposition": f'inline; filename="{meta["filename"]}"'},
+    )
+
+@app.post("/img2img", summary="Image to Image with Flux Canny")
+async def img2img(prompt: str, image: UploadFile = File(...)):
+    # 验证文件类型
+    if not image.content_type.startswith('image/'):
+        raise HTTPException(400, "文件必须是图像类型")
+    
+    # 读取上传的图像
+    image_bytes = await image.read()
+    
+    # 确保文件名有正确的扩展名
+    if not image.filename or '.' not in image.filename:
+        raise HTTPException(400, "文件名必须包含扩展名")
+    
+    # 上传到 ComfyUI
+    uploaded_filename = await upload_image_to_comfyui(image_bytes, image.filename)
+    
+    client_id = str(uuid.uuid4())
+    workflow = build_workflow(prompt, uploaded_filename)
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(f"{BASE}/prompt", json={"prompt": workflow, "client_id": client_id}) as resp:
+            if resp.status != 200:
+                text = await resp.text()
+                raise HTTPException(502, f"ComfyUI 提交失败: {text}")
+            data = await resp.json()
+            prompt_id = data["prompt_id"]
+
+    meta = await wait_for_image_meta(prompt_id)
+    img_bytes = await download_image_bytes(meta)
+    
     return Response(
         content=img_bytes,
         media_type="image/png",
@@ -133,9 +186,6 @@ async def txt2img(prompt: str):
 @app.get("/")
 def root():
     """
-    Root endpoint that returns a welcome message.
-
-    Returns:
-        A dictionary with a welcome message.
+    根端点
     """
-    return {"message": "ComfyUI FastAPI wrapper is running"}
+    return {"message": "ComfyUI Flux Canny API is running"}
