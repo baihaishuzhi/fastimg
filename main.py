@@ -10,28 +10,35 @@ COMFY_HOST = "127.0.0.1"
 COMFY_PORT = 8188
 BASE = f"http://{COMFY_HOST}:{COMFY_PORT}"
 WORKFLOW_PATH = Path(__file__).with_name("flux_canny_model_v1.json")
-# ---------------------------------------
+DEFAULT_SYSTEM_PROMPT = "You are JADE-CAD v6, an expert AI jade-design engine trained on 2.3M annotated carving blueprints, 480k historical rubbings, 52k gemmological reports, and 8k CNC tool-path datasets. You output only manufacturable, culture-accurate, cost-aware jade carving designs that honor traditional Chinese jade art while meeting modern production standards. Specialize in classical motifs, auspicious symbols, and technical precision. Based on your expertise, please create a design that precisely matches the following user requirements:"# ---------------------------------------
 
 app = FastAPI(title="ComfyUI Flux Canny API", version="1.0")
 
 with WORKFLOW_PATH.open(encoding="utf-8") as f:
     WORKFLOW_TEMPLATE = json.load(f)
 
-def build_workflow(prompt: str, image_filename: str = None) -> dict:
+def build_workflow(prompt: str, image_filename: str = None, system_prompt: str = None) -> dict:
     """
     构建 Flux Canny 工作流
     
     Args:
-        prompt: 文本提示词
+        prompt: 用户文本提示词
         image_filename: 输入图像文件名（可选）
+        system_prompt: 系统提示词（可选）
     
     Returns:
         工作流字典
     """
     wf = json.loads(json.dumps(WORKFLOW_TEMPLATE))
     
+    # 组合系统提示词和用户提示词
+    if system_prompt:
+        combined_prompt = f"{system_prompt}\n\n{prompt}"
+    else:
+        combined_prompt = f"{DEFAULT_SYSTEM_PROMPT}\n\n{prompt}"
+    
     # 更新节点23的文本提示词
-    wf["23"]["inputs"]["text"] = prompt
+    wf["23"]["inputs"]["text"] = combined_prompt
     
     # 如果提供了图像文件名，更新节点17的输入图像
     if image_filename:
@@ -117,18 +124,19 @@ async def download_image_bytes(meta: dict) -> bytes:
             return await resp.read()
 
 @app.post("/txt2img", summary="Text to Image with Flux")
-async def txt2img(prompt: str):
+async def txt2img(prompt: str, system_prompt: str = None):
     """
     使用 Flux 模型生成图像
     
     Args:
-        prompt: 文本提示词
+        prompt: 用户文本提示词
+        system_prompt: 系统提示词（可选）
     
     Returns:
         生成的图像
     """
     client_id = str(uuid.uuid4())
-    workflow = build_workflow(prompt)
+    workflow = build_workflow(prompt, system_prompt=system_prompt)
 
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{BASE}/prompt", json={"prompt": workflow, "client_id": client_id}) as resp:
@@ -148,7 +156,7 @@ async def txt2img(prompt: str):
     )
 
 @app.post("/img2img", summary="Image to Image with Flux Canny")
-async def img2img(prompt: str, image: UploadFile = File(...)):
+async def img2img(prompt: str, image: UploadFile = File(...), system_prompt: str = None):
     # 验证文件类型
     if not image.content_type.startswith('image/'):
         raise HTTPException(400, "文件必须是图像类型")
@@ -164,7 +172,7 @@ async def img2img(prompt: str, image: UploadFile = File(...)):
     uploaded_filename = await upload_image_to_comfyui(image_bytes, image.filename)
     
     client_id = str(uuid.uuid4())
-    workflow = build_workflow(prompt, uploaded_filename)
+    workflow = build_workflow(prompt, uploaded_filename, system_prompt)
 
     async with aiohttp.ClientSession() as session:
         async with session.post(f"{BASE}/prompt", json={"prompt": workflow, "client_id": client_id}) as resp:
