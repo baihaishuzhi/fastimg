@@ -10,9 +10,23 @@ COMFY_HOST = "127.0.0.1"
 COMFY_PORT = 8188
 BASE = f"http://{COMFY_HOST}:{COMFY_PORT}"
 WORKFLOW_PATH = Path(__file__).with_name("flux_canny_model_v1.json")
-DEFAULT_SYSTEM_PROMPT = "You are JADE-CAD v6, an expert AI jade-design engine trained on 2.3M annotated carving blueprints, 480k historical rubbings, 52k gemmological reports, and 8k CNC tool-path datasets. You output only manufacturable, culture-accurate, cost-aware jade carving designs that honor traditional Chinese jade art while meeting modern production standards. Specialize in classical motifs, auspicious symbols, and technical precision. Based on your expertise, please create a design that precisely matches the following user requirements:"# ---------------------------------------
-
-app = FastAPI(title="ComfyUI Flux Canny API", version="1.0")
+# DEFAULT_SYSTEM_PROMPT = "You are JADE-CAD v6, an expert AI jade-design engine trained on 2.3M annotated carving blueprints, 480k historical rubbings, 52k gemmological reports, and 8k CNC tool-path datasets. You output only manufacturable, culture-accurate, cost-aware jade carving designs that honor traditional Chinese jade art while meeting modern production standards. Specialize in classical motifs, auspicious symbols, and technical precision. Based on your expertise, please create a design that precisely matches the following user requirements:"# ---------------------------------------
+# DEFAULT_SYSTEM_PROMPT = "You are a professional jade carving design specialist. Create manufacturable, culture-accurate jade carving designs that honor traditional Chinese jade art. Specialize in classical motifs, auspicious symbols, and technical precision. Generate designs that must: 1) Stay within the shape boundaries of the reference image, 2) Be jade-related design blueprints only, 3) Strictly follow the user's specific requirements:"
+DEFAULT_SYSTEM_PROMPT = "You are JADE-CAD v6, an expert AI jade-design engine. You output only manufacturable, culture-accurate, cost-aware jade carving designs that honor traditional Chinese jade art while meeting modern production standards. Specialize in classical motifs, auspicious symbols, and technical precision.  Generate designs that must: 1) Stay within the shape boundaries of the reference image, 2) Be jade-related design blueprints only, 3) White background. Based on your expertise and those rules, please create a design that precisely matches the following user requirements:"
+app = FastAPI(
+    title="玉石模型API", 
+    version="1.0",
+    tags_metadata=[
+        {
+            "name": "玉石雕刻",
+            "description": "玉石雕刻设计相关的API接口",
+        },
+        {
+            "name": "系统状态",
+            "description": "系统状态检查接口",
+        }
+    ]
+)
 
 with WORKFLOW_PATH.open(encoding="utf-8") as f:
     WORKFLOW_TEMPLATE = json.load(f)
@@ -123,39 +137,8 @@ async def download_image_bytes(meta: dict) -> bytes:
                 raise HTTPException(502, f"下载图片失败: {text}")
             return await resp.read()
 
-@app.post("/txt2img", summary="Text to Image with Flux")
-async def txt2img(prompt: str, system_prompt: str = None):
-    """
-    使用 Flux 模型生成图像
-    
-    Args:
-        prompt: 用户文本提示词
-        system_prompt: 系统提示词（可选）
-    
-    Returns:
-        生成的图像
-    """
-    client_id = str(uuid.uuid4())
-    workflow = build_workflow(prompt, system_prompt=system_prompt)
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(f"{BASE}/prompt", json={"prompt": workflow, "client_id": client_id}) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise HTTPException(502, f"ComfyUI 提交失败: {text}")
-            data = await resp.json()
-            prompt_id = data["prompt_id"]
-
-    meta = await wait_for_image_meta(prompt_id)
-    img_bytes = await download_image_bytes(meta)
-    
-    return Response(
-        content=img_bytes,
-        media_type="image/png",
-        headers={"Content-Disposition": f'inline; filename="{meta["filename"]}"'},
-    )
-
-@app.post("/img2img", summary="Image to Image with Flux Canny")
+@app.post("/img2img", summary="Image to Image with Flux Canny", tags=["玉石雕刻"])
 async def img2img(prompt: str, image: UploadFile = File(...), system_prompt: str = None):
     # 验证文件类型
     if not image.content_type.startswith('image/'):
@@ -191,9 +174,9 @@ async def img2img(prompt: str, image: UploadFile = File(...), system_prompt: str
         headers={"Content-Disposition": f'inline; filename="{meta["filename"]}"'},
     )
 
-@app.get("/")
+@app.get("/", tags=["系统状态"])
 def root():
     """
     根端点
     """
-    return {"message": "ComfyUI Flux Canny API is running"}
+    return {"message": "玉石模型API is running"}
